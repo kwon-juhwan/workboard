@@ -18,7 +18,7 @@ st.title("Exchange / Return Monthly Dashboard")
 # =====================================
 # 1) public 저장소면 RAW URL만 넣으면 됨
 # 2) private 저장소면 st.secrets["GITHUB_TOKEN"] 필요
-GITHUB_FILE_URL = "https://raw.githubusercontent.com/사용자명/저장소명/main/data/latest.xlsx"
+GITHUB_FILE_URL = "https://raw.githubusercontent.com/kwon-juhwan/workboard/main/data/통합문서1.xlsx"
 
 # private 저장소 사용 여부
 USE_GITHUB_TOKEN = False
