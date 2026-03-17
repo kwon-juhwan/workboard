@@ -1,32 +1,18 @@
 # app.py
 import re
-from io import BytesIO
-
 import pandas as pd
-import requests
 import streamlit as st
 
 st.set_page_config(
-    page_title="Exchange / Return Dashboard",
+    page_title="교환/반품 대시보드",
     layout="wide"
 )
 
-st.title("Exchange / Return Monthly Dashboard")
+st.title("교환 / 반품 월별 지표 대시보드")
 
-# =====================================
-# GitHub 설정
-# =====================================
-# 1) public 저장소면 RAW URL만 넣으면 됨
-# 2) private 저장소면 st.secrets["GITHUB_TOKEN"] 필요
-GITHUB_FILE_URL = "https://raw.githubusercontent.com/kwon-juhwan/workboard/main/data/통합문서1.xlsx"
-
-# private 저장소 사용 여부
-USE_GITHUB_TOKEN = False
-
-
-# =====================================
+# -----------------------------
 # 유틸
-# =====================================
+# -----------------------------
 def normalize_text(x):
     if pd.isna(x):
         return ""
@@ -49,10 +35,10 @@ def extract_month(x):
 def classify_exchange_return(x):
     x = normalize_text(x)
     if "교환" in x:
-        return "Exchange"
+        return "교환"
     if "반품" in x:
-        return "Return"
-    return "Other"
+        return "반품"
+    return "기타"
 
 def safe_pct(numerator, denominator):
     if denominator == 0:
@@ -63,57 +49,29 @@ def calc_delta_text(series, month_value):
     series = series.sort_index()
     if month_value not in series.index:
         return None, "0"
-
     current = series.loc[month_value]
-    prev_months = [m for m in series.index if m < month_value]
 
+    prev_months = [m for m in series.index if m < month_value]
     if not prev_months:
-        return None, "No previous month"
+        return None, "전월 없음"
 
     prev = series.loc[max(prev_months)]
     delta = current - prev
-
-    if isinstance(delta, float):
-        return delta, f"{delta:+.1f}"
     return delta, f"{delta:+,}"
 
+# -----------------------------
+# 데이터 로드
+# -----------------------------
+@st.cache_data
+def load_data(uploaded_file):
+    df = pd.read_excel(uploaded_file)
 
-# =====================================
-# GitHub에서 파일 읽기
-# =====================================
-@st.cache_data(ttl=300)
-def download_excel_from_github(url, use_token=False):
-    headers = {}
-
-    if use_token:
-        token = st.secrets.get("GITHUB_TOKEN", "")
-        if not token:
-            raise ValueError("private 저장소 사용 중인데 st.secrets에 GITHUB_TOKEN이 없습니다.")
-        headers["Authorization"] = f"token {token}"
-
-    response = requests.get(url, headers=headers, timeout=30)
-    response.raise_for_status()
-
-    return BytesIO(response.content)
-
-
-@st.cache_data(ttl=300)
-def load_data_from_github(url, use_token=False):
-    file_obj = download_excel_from_github(url, use_token)
-    df = pd.read_excel(file_obj)
-
-    # 컬럼 자동 정리
+    # 컬럼명 정리
     cols = list(df.columns)
     rename_map = {}
-
     for c in cols:
-        c_str = str(c).strip()
-
-        if c_str.startswith("Unnamed"):
+        if str(c).startswith("Unnamed"):
             rename_map[c] = "채널"
-        elif c_str in ["접수일", "채널", "주문번호", "배송비", "교환/반품"]:
-            rename_map[c] = c_str
-
     df = df.rename(columns=rename_map)
 
     expected_cols = ["접수일", "채널", "주문번호", "배송비", "교환/반품"]
@@ -121,71 +79,62 @@ def load_data_from_github(url, use_token=False):
     if missing:
         raise ValueError(f"필수 컬럼이 없습니다: {missing}")
 
-    # 기본 전처리
-    for col in expected_cols:
+    # 기본 정리
+    for col in ["접수일", "채널", "주문번호", "배송비", "교환/반품"]:
         df[col] = df[col].apply(normalize_text)
 
     df["배송비_공백제거"] = df["배송비"].apply(normalize_no_space)
     df["월"] = df["접수일"].apply(extract_month)
     df["구분"] = df["교환/반품"].apply(classify_exchange_return)
 
-    # 특수 지표
+    # 지표용 플래그
     df["미청구(N배송)"] = df["배송비_공백제거"].str.contains(r"미청구\(N배송\)", na=False)
     df["첫구매 무료반품"] = df["배송비_공백제거"].str.contains(r"첫구매무료반품", na=False)
     df["첫구매 무료교환"] = df["배송비_공백제거"].str.contains(r"첫구매무료교환", na=False)
 
     return df
 
+uploaded_file = st.file_uploader("교환/반품 내역 엑셀 업로드", type=["xlsx"])
 
-# =====================================
-# 데이터 로드
-# =====================================
-with st.spinner("GitHub에서 엑셀 파일 불러오는 중..."):
-    try:
-        df = load_data_from_github(GITHUB_FILE_URL, USE_GITHUB_TOKEN)
-    except Exception as e:
-        st.error(f"GitHub 파일 로드 실패: {e}")
-        st.stop()
+if uploaded_file is None:
+    st.info("엑셀 파일을 업로드하면 대시보드가 표시됩니다.")
+    st.stop()
 
-st.success("최신 GitHub 엑셀 파일을 불러왔습니다.")
+try:
+    df = load_data(uploaded_file)
+except Exception as e:
+    st.error(f"파일 로드 중 오류가 발생했습니다: {e}")
+    st.stop()
 
-with st.expander("현재 연결된 파일 정보"):
-    st.write(f"**GitHub URL**: {GITHUB_FILE_URL}")
-    st.write(f"**Rows**: {len(df):,}")
-
-
-# =====================================
+# -----------------------------
 # 사이드바 필터
-# =====================================
-st.sidebar.header("Filter")
+# -----------------------------
+st.sidebar.header("필터")
 
 month_options = sorted([m for m in df["월"].dropna().unique().tolist()])
 channel_options = sorted([c for c in df["채널"].dropna().unique().tolist() if c])
 
 selected_months = st.sidebar.multiselect(
-    "Month",
+    "월 선택",
     options=month_options,
     default=month_options
 )
 
 selected_channels = st.sidebar.multiselect(
-    "Channel",
+    "채널 선택",
     options=channel_options,
     default=channel_options
 )
 
 filtered = df.copy()
-
 if selected_months:
     filtered = filtered[filtered["월"].isin(selected_months)]
-
 if selected_channels:
     filtered = filtered[filtered["채널"].isin(selected_channels)]
 
-
-# =====================================
+# -----------------------------
 # 월별 집계
-# =====================================
+# -----------------------------
 monthly_special = (
     filtered.groupby("월")[["미청구(N배송)", "첫구매 무료반품", "첫구매 무료교환"]]
     .sum()
@@ -193,7 +142,7 @@ monthly_special = (
     .sort_values("월")
 )
 
-exchange_return_df = filtered[filtered["구분"].isin(["Exchange", "Return"])].copy()
+exchange_return_df = filtered[filtered["구분"].isin(["교환", "반품"])].copy()
 
 monthly_type = (
     exchange_return_df.groupby(["월", "구분"])
@@ -203,152 +152,119 @@ monthly_type = (
     .sort_values("월")
 )
 
-if "Exchange" not in monthly_type.columns:
-    monthly_type["Exchange"] = 0
-if "Return" not in monthly_type.columns:
-    monthly_type["Return"] = 0
+if "교환" not in monthly_type.columns:
+    monthly_type["교환"] = 0
+if "반품" not in monthly_type.columns:
+    monthly_type["반품"] = 0
 
-monthly_type["Total Cases"] = monthly_type["Exchange"] + monthly_type["Return"]
-monthly_type["Exchange Ratio (%)"] = monthly_type.apply(
-    lambda row: safe_pct(row["Exchange"], row["Total Cases"]), axis=1
+monthly_type["총접수"] = monthly_type["교환"] + monthly_type["반품"]
+monthly_type["교환비중(%)"] = monthly_type.apply(
+    lambda row: safe_pct(row["교환"], row["총접수"]), axis=1
 )
-monthly_type["Return Ratio (%)"] = monthly_type.apply(
-    lambda row: safe_pct(row["Return"], row["Total Cases"]), axis=1
+monthly_type["반품비중(%)"] = monthly_type.apply(
+    lambda row: safe_pct(row["반품"], row["총접수"]), axis=1
 )
 
-
-# =====================================
+# -----------------------------
 # 상단 KPI
-# =====================================
-st.subheader("KPI Summary")
+# -----------------------------
+st.subheader("핵심 요약")
 
-c1, c2, c3 = st.columns(3)
-c1.metric("Uncharged (N Shipping)", int(filtered["미청구(N배송)"].sum()))
-c2.metric("First Purchase Free Return", int(filtered["첫구매 무료반품"].sum()))
-c3.metric("First Purchase Free Exchange", int(filtered["첫구매 무료교환"].sum()))
+col1, col2, col3 = st.columns(3)
+col1.metric("미청구(N배송)", int(filtered["미청구(N배송)"].sum()))
+col2.metric("첫구매 무료반품", int(filtered["첫구매 무료반품"].sum()))
+col3.metric("첫구매 무료교환", int(filtered["첫구매 무료교환"].sum()))
 
-c4, c5, c6 = st.columns(3)
-c4.metric("Exchange Count", int((filtered["구분"] == "Exchange").sum()))
-c5.metric("Return Count", int((filtered["구분"] == "Return").sum()))
-c6.metric("Total Records", int(len(filtered)))
+col4, col5, col6 = st.columns(3)
+col4.metric("교환 건수", int((filtered["구분"] == "교환").sum()))
+col5.metric("반품 건수", int((filtered["구분"] == "반품").sum()))
+col6.metric("전체 건수", int(len(filtered)))
 
-
-# =====================================
-# 전월 대비
-# =====================================
-st.subheader("Month-over-Month Change")
+# -----------------------------
+# 선택 월 기준 전월 대비
+# -----------------------------
+st.subheader("전월 대비 변화")
 
 if len(selected_months) == 1:
     target_month = selected_months[0]
 
-    ms_indexed = monthly_special.set_index("월") if not monthly_special.empty else pd.DataFrame()
-    mt_indexed = monthly_type.set_index("월") if not monthly_type.empty else pd.DataFrame()
+    ms_indexed = monthly_special.set_index("월")
+    mt_indexed = monthly_type.set_index("월")
 
-    d1, d1_text = calc_delta_text(ms_indexed["미청구(N배송)"], target_month) if not ms_indexed.empty else (None, "No previous month")
-    d2, d2_text = calc_delta_text(ms_indexed["첫구매 무료반품"], target_month) if not ms_indexed.empty else (None, "No previous month")
-    d3, d3_text = calc_delta_text(ms_indexed["첫구매 무료교환"], target_month) if not ms_indexed.empty else (None, "No previous month")
-    d4, d4_text = calc_delta_text(mt_indexed["Exchange"], target_month) if not mt_indexed.empty else (None, "No previous month")
-    d5, d5_text = calc_delta_text(mt_indexed["Return"], target_month) if not mt_indexed.empty else (None, "No previous month")
-    d6, d6_text = calc_delta_text(mt_indexed["Return Ratio (%)"], target_month) if not mt_indexed.empty else (None, "No previous month")
+    d1, d1_text = calc_delta_text(ms_indexed["미청구(N배송)"], target_month) if not ms_indexed.empty else (None, "전월 없음")
+    d2, d2_text = calc_delta_text(ms_indexed["첫구매 무료반품"], target_month) if not ms_indexed.empty else (None, "전월 없음")
+    d3, d3_text = calc_delta_text(ms_indexed["첫구매 무료교환"], target_month) if not ms_indexed.empty else (None, "전월 없음")
+    d4, d4_text = calc_delta_text(mt_indexed["교환"], target_month) if not mt_indexed.empty else (None, "전월 없음")
+    d5, d5_text = calc_delta_text(mt_indexed["반품"], target_month) if not mt_indexed.empty else (None, "전월 없음")
+    d6, d6_text = calc_delta_text(mt_indexed["반품비중(%)"], target_month) if not mt_indexed.empty else (None, "전월 없음")
 
-    k1, k2, k3 = st.columns(3)
-    k1.metric(
-        f"{target_month}월 Uncharged (N Shipping)",
-        int(ms_indexed.loc[target_month, "미청구(N배송)"]) if target_month in ms_indexed.index else 0,
-        d1_text
-    )
-    k2.metric(
-        f"{target_month}월 First Purchase Free Return",
-        int(ms_indexed.loc[target_month, "첫구매 무료반품"]) if target_month in ms_indexed.index else 0,
-        d2_text
-    )
-    k3.metric(
-        f"{target_month}월 First Purchase Free Exchange",
-        int(ms_indexed.loc[target_month, "첫구매 무료교환"]) if target_month in ms_indexed.index else 0,
-        d3_text
-    )
+    c1, c2, c3 = st.columns(3)
+    c1.metric(f"{target_month}월 미청구(N배송)", int(ms_indexed.loc[target_month, "미청구(N배송)"]) if target_month in ms_indexed.index else 0, d1_text)
+    c2.metric(f"{target_month}월 첫구매 무료반품", int(ms_indexed.loc[target_month, "첫구매 무료반품"]) if target_month in ms_indexed.index else 0, d2_text)
+    c3.metric(f"{target_month}월 첫구매 무료교환", int(ms_indexed.loc[target_month, "첫구매 무료교환"]) if target_month in ms_indexed.index else 0, d3_text)
 
-    k4, k5, k6 = st.columns(3)
-    k4.metric(
-        f"{target_month}월 Exchange Count",
-        int(mt_indexed.loc[target_month, "Exchange"]) if target_month in mt_indexed.index else 0,
-        d4_text
-    )
-    k5.metric(
-        f"{target_month}월 Return Count",
-        int(mt_indexed.loc[target_month, "Return"]) if target_month in mt_indexed.index else 0,
-        d5_text
-    )
-    k6.metric(
-        f"{target_month}월 Return Ratio (%)",
-        float(mt_indexed.loc[target_month, "Return Ratio (%)"]) if target_month in mt_indexed.index else 0.0,
+    c4, c5, c6 = st.columns(3)
+    c4.metric(f"{target_month}월 교환 건수", int(mt_indexed.loc[target_month, "교환"]) if target_month in mt_indexed.index else 0, d4_text)
+    c5.metric(f"{target_month}월 반품 건수", int(mt_indexed.loc[target_month, "반품"]) if target_month in mt_indexed.index else 0, d5_text)
+    c6.metric(
+        f"{target_month}월 반품 비중(%)",
+        float(mt_indexed.loc[target_month, "반품비중(%)"]) if target_month in mt_indexed.index else 0.0,
         d6_text
     )
 else:
     st.info("전월 대비는 월을 1개만 선택했을 때 표시됩니다.")
 
-
-# =====================================
+# -----------------------------
 # 차트
-# =====================================
-st.subheader("Monthly Trend of Special Shipping Reasons")
+# -----------------------------
+st.subheader("월별 특수 배송비 사유 추이")
 if not monthly_special.empty:
     chart_special = monthly_special.set_index("월")[["미청구(N배송)", "첫구매 무료반품", "첫구매 무료교환"]]
     st.line_chart(chart_special, use_container_width=True)
 else:
     st.warning("표시할 데이터가 없습니다.")
 
-st.subheader("Monthly Exchange / Return Count")
+st.subheader("월별 교환 / 반품 건수")
 if not monthly_type.empty:
-    chart_count = monthly_type.set_index("월")[["Exchange", "Return"]]
+    chart_count = monthly_type.set_index("월")[["교환", "반품"]]
     st.bar_chart(chart_count, use_container_width=True)
 else:
     st.warning("표시할 데이터가 없습니다.")
 
-st.subheader("Monthly Exchange / Return Ratio")
+st.subheader("월별 교환 / 반품 비중(현재 파일 기준)")
 if not monthly_type.empty:
-    chart_ratio = monthly_type.set_index("월")[["Exchange Ratio (%)", "Return Ratio (%)"]]
+    chart_ratio = monthly_type.set_index("월")[["교환비중(%)", "반품비중(%)"]]
     st.line_chart(chart_ratio, use_container_width=True)
 else:
     st.warning("표시할 데이터가 없습니다.")
 
-
-# =====================================
-# 집계표
-# =====================================
-st.subheader("Monthly Special Reason Summary")
+# -----------------------------
+# 표
+# -----------------------------
+st.subheader("월별 특수 사유 집계표")
 st.dataframe(monthly_special, use_container_width=True)
 
-st.subheader("Monthly Exchange / Return Ratio Table")
+st.subheader("월별 교환 / 반품 비중표")
 st.dataframe(monthly_type, use_container_width=True)
 
-
-# =====================================
-# 상세 내역
-# =====================================
-st.subheader("Detail Records")
+# -----------------------------
+# 상세 조회
+# -----------------------------
+st.subheader("상세 내역")
 
 detail_type = st.selectbox(
-    "Detail Type",
-    [
-        "All",
-        "Exchange",
-        "Return",
-        "Other",
-        "미청구(N배송)",
-        "첫구매 무료반품",
-        "첫구매 무료교환"
-    ]
+    "상세 구분",
+    ["전체", "교환", "반품", "기타", "미청구(N배송)", "첫구매 무료반품", "첫구매 무료교환"]
 )
 
 detail_df = filtered.copy()
 
-if detail_type == "Exchange":
-    detail_df = detail_df[detail_df["구분"] == "Exchange"]
-elif detail_type == "Return":
-    detail_df = detail_df[detail_df["구분"] == "Return"]
-elif detail_type == "Other":
-    detail_df = detail_df[detail_df["구분"] == "Other"]
+if detail_type == "교환":
+    detail_df = detail_df[detail_df["구분"] == "교환"]
+elif detail_type == "반품":
+    detail_df = detail_df[detail_df["구분"] == "반품"]
+elif detail_type == "기타":
+    detail_df = detail_df[detail_df["구분"] == "기타"]
 elif detail_type == "미청구(N배송)":
     detail_df = detail_df[detail_df["미청구(N배송)"]]
 elif detail_type == "첫구매 무료반품":
@@ -359,24 +275,15 @@ elif detail_type == "첫구매 무료교환":
 show_cols = ["접수일", "월", "채널", "주문번호", "배송비", "교환/반품", "구분"]
 st.dataframe(detail_df[show_cols], use_container_width=True)
 
-
-# =====================================
-# 다운로드
-# =====================================
-st.subheader("Download")
+# -----------------------------
+# CSV 다운로드
+# -----------------------------
+st.subheader("다운로드")
 
 csv_data = detail_df[show_cols].to_csv(index=False).encode("utf-8-sig")
 st.download_button(
-    label="Download Current Detail CSV",
+    label="현재 상세 내역 CSV 다운로드",
     data=csv_data,
-    file_name="exchange_return_detail.csv",
+    file_name="교환반품_상세내역.csv",
     mime="text/csv"
 )
-
-
-# =====================================
-# 새로고침 버튼
-# =====================================
-if st.button("GitHub 데이터 새로고침"):
-    st.cache_data.clear()
-    st.rerun()
