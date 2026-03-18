@@ -59,6 +59,11 @@ def classify_shipping(text: str) -> str:
 
     if not s or s in {"nan", '"', "**"}:
         return "기타/미분류"
+
+    # ✅ 추가 (이거 넣으면 끝)
+    if "미청구" in s or "n배송" in s_low:
+        return "미청구(N배송)"
+
     if "첫" in s and ("무료반품" in s or "무료 반품" in s):
         return "첫구매 무료반품"
     if "첫" in s and ("무료교환" in s or "무료 교환" in s):
@@ -75,6 +80,7 @@ def classify_shipping(text: str) -> str:
         return "처리보류"
     if "확인" in s_low:
         return "확인 필요"
+
     return "기타/미분류"
 
 
