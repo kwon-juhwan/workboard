@@ -1,4 +1,6 @@
-import re
+from pathlib import Path
+
+code = r'''import re
 from pathlib import Path
 
 import pandas as pd
@@ -8,18 +10,13 @@ import streamlit as st
 st.set_page_config(page_title="교환/반품 대시보드", layout="wide")
 
 FILE_PATH = Path(__file__).with_name("교환반품.xlsx")
-SHEET_HINT_YEAR = {
-    "Sheet1": 2025,
-    "Sheet2": 2026,
-}
+DEFAULT_SHEET = "Sheet1"
 
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     cols = []
     for c in df.columns:
-        if pd.isna(c):
-            cols.append("채널")
-        elif str(c).startswith("Unnamed"):
+        if pd.isna(c) or str(c).startswith("Unnamed"):
             cols.append("채널")
         else:
             cols.append(str(c).strip())
@@ -32,15 +29,12 @@ def extract_year_from_order_no(value):
         return None
     s = str(value)
     m = re.match(r"(20\d{2})", s)
-    if m:
-        return int(m.group(1))
-    return None
+    return int(m.group(1)) if m else None
 
 
 def parse_date_value(value, fallback_year=None):
     if pd.isna(value):
         return pd.NaT
-
     if isinstance(value, pd.Timestamp):
         return value
 
@@ -86,40 +80,61 @@ def classify_shipping(text: str) -> str:
     return "기타/미분류"
 
 
-@st.cache_data
-def load_data(file_path: str) -> pd.DataFrame:
-    xls = pd.ExcelFile(file_path)
-    frames = []
-
+@st.cache_data(ttl=0)
+def inspect_excel(file_obj):
+    xls = pd.ExcelFile(file_obj)
+    info = []
     for sheet_name in xls.sheet_names:
-        raw = pd.read_excel(file_path, sheet_name=sheet_name)
-        raw = normalize_columns(raw)
-        raw = raw[[c for c in raw.columns if c in ["접수일", "채널", "주문번호", "배송비", "교환/반품"]]].copy()
-        raw["sheet_name"] = sheet_name
+        raw = pd.read_excel(file_obj, sheet_name=sheet_name)
+        info.append(
+            {
+                "sheet_name": sheet_name,
+                "rows": len(raw),
+                "columns": list(raw.columns),
+            }
+        )
+    return info
 
-        fallback_year = SHEET_HINT_YEAR.get(sheet_name)
-        if fallback_year is None:
-            sample_years = raw["주문번호"].dropna().astype(str).head(50).map(extract_year_from_order_no).dropna()
-            fallback_year = int(sample_years.mode().iloc[0]) if not sample_years.empty else pd.Timestamp.today().year
 
-        raw["접수일_dt"] = raw["접수일"].apply(lambda x: parse_date_value(x, fallback_year=fallback_year))
-        raw["연도"] = raw["접수일_dt"].dt.year
-        raw["월"] = raw["접수일_dt"].dt.month
-        raw["연월"] = raw["접수일_dt"].dt.strftime("%Y-%m")
-        raw["주차"] = raw["접수일_dt"].dt.isocalendar().week.astype("Int64")
-        raw["요일"] = raw["접수일_dt"].dt.day_name()
+@st.cache_data(ttl=0)
+def load_data(file_obj, selected_sheet: str) -> pd.DataFrame:
+    raw = pd.read_excel(file_obj, sheet_name=selected_sheet)
+    raw = normalize_columns(raw)
 
-        raw["채널"] = raw["채널"].fillna("미기재").astype(str).str.strip()
-        raw["배송비"] = raw["배송비"].fillna("미기재").astype(str).str.strip()
-        raw["교환/반품"] = raw["교환/반품"].fillna("미기재").astype(str).str.strip()
-        raw["배송비_분류"] = raw["배송비"].apply(classify_shipping)
+    need_cols = ["접수일", "채널", "주문번호", "배송비", "교환/반품"]
+    raw = raw[[c for c in raw.columns if c in need_cols]].copy()
 
-        frames.append(raw)
+    for col in need_cols:
+        if col not in raw.columns:
+            raw[col] = None
 
-    df = pd.concat(frames, ignore_index=True)
-    df = df.dropna(subset=["접수일_dt"]).copy()
-    df = df.sort_values("접수일_dt")
-    return df
+    raw["sheet_name"] = selected_sheet
+
+    sample_years = (
+        raw["주문번호"]
+        .dropna()
+        .astype(str)
+        .head(100)
+        .map(extract_year_from_order_no)
+        .dropna()
+    )
+    fallback_year = int(sample_years.mode().iloc[0]) if not sample_years.empty else pd.Timestamp.today().year
+
+    raw["접수일_dt"] = raw["접수일"].apply(lambda x: parse_date_value(x, fallback_year=fallback_year))
+    raw["연도"] = raw["접수일_dt"].dt.year
+    raw["월"] = raw["접수일_dt"].dt.month
+    raw["연월"] = raw["접수일_dt"].dt.strftime("%Y-%m")
+    raw["주차"] = raw["접수일_dt"].dt.isocalendar().week.astype("Int64")
+    raw["요일"] = raw["접수일_dt"].dt.day_name()
+
+    raw["채널"] = raw["채널"].fillna("미기재").astype(str).str.strip()
+    raw["배송비"] = raw["배송비"].fillna("미기재").astype(str).str.strip()
+    raw["교환/반품"] = raw["교환/반품"].fillna("미기재").astype(str).str.strip()
+    raw["배송비_분류"] = raw["배송비"].apply(classify_shipping)
+
+    raw = raw.dropna(subset=["접수일_dt"]).copy()
+    raw = raw.sort_values("접수일_dt").reset_index(drop=True)
+    return raw
 
 
 def kpi_card(label, value, delta=None):
@@ -134,11 +149,37 @@ def main():
     st.title("교환 / 반품 통합 대시보드")
     st.caption("업로드된 Excel 파일 기준으로 교환/반품 현황을 시각화합니다.")
 
-    if not FILE_PATH.exists():
+    with st.sidebar:
+        st.header("파일")
+        uploaded_file = st.file_uploader("엑셀 업로드", type=["xlsx"])
+        if st.button("캐시 초기화"):
+            st.cache_data.clear()
+            st.success("캐시를 초기화했습니다.")
+
+    file_source = uploaded_file if uploaded_file is not None else FILE_PATH
+
+    if uploaded_file is None and not FILE_PATH.exists():
         st.error(f"엑셀 파일을 찾을 수 없습니다: {FILE_PATH}")
         st.stop()
 
-    df = load_data(str(FILE_PATH))
+    excel_info = inspect_excel(file_source)
+    sheet_names = [x["sheet_name"] for x in excel_info]
+
+    default_sheet = DEFAULT_SHEET if DEFAULT_SHEET in sheet_names else sheet_names[0]
+
+    with st.sidebar:
+        selected_sheet = st.selectbox("시트 선택", sheet_names, index=sheet_names.index(default_sheet))
+
+    df = load_data(file_source, selected_sheet)
+
+    with st.expander("디버그 확인", expanded=False):
+        st.write("사용 파일:", uploaded_file.name if uploaded_file is not None else str(FILE_PATH))
+        st.write("시트별 원본 행수")
+        st.dataframe(pd.DataFrame(excel_info), use_container_width=True)
+        st.write("현재 선택 시트:", selected_sheet)
+        st.write("최종 적재 행수:", len(df))
+        st.write("중복 행 수(핵심 5개 컬럼 기준):", int(df[["접수일", "채널", "주문번호", "배송비", "교환/반품"]].duplicated().sum()))
+        st.write("교환/반품 고유값:", sorted(df["교환/반품"].dropna().astype(str).unique().tolist()))
 
     with st.sidebar:
         st.header("필터")
@@ -177,6 +218,9 @@ def main():
     return_count = int((filtered["교환/반품"] == "반품").sum())
     as_count = int((filtered["교환/반품"] == "A/S").sum())
 
+    free_return_count = int((filtered["배송비_분류"] == "첫구매 무료반품").sum())
+    company_cost_count = int(filtered["배송비_분류"].isin(["당사부담", "첫구매 무료반품", "첫구매 무료교환"]).sum())
+
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         kpi_card("총 건수", total_count)
@@ -186,6 +230,18 @@ def main():
         kpi_card("반품", return_count, f"비중 {return_count / total_count:.1%}" if total_count else "비중 0.0%")
     with c4:
         kpi_card("A/S", as_count, f"비중 {as_count / total_count:.1%}" if total_count else "비중 0.0%")
+
+    c5, c6, c7, c8 = st.columns(4)
+    with c5:
+        exchange_rate = (exchange_count / total_count * 100) if total_count else 0
+        kpi_card("교환률", round(exchange_rate, 2), f"{exchange_rate:.2f}%")
+    with c6:
+        return_rate = (return_count / total_count * 100) if total_count else 0
+        kpi_card("반품률", round(return_rate, 2), f"{return_rate:.2f}%")
+    with c7:
+        kpi_card("첫구매 무료반품", free_return_count, f"비중 {free_return_count / total_count:.1%}" if total_count else "비중 0.0%")
+    with c8:
+        kpi_card("회사부담성 배송비", company_cost_count, f"비중 {company_cost_count / total_count:.1%}" if total_count else "비중 0.0%")
 
     col1, col2 = st.columns(2)
 
@@ -251,6 +307,38 @@ def main():
         else:
             st.info("표시할 데이터가 없습니다.")
 
+    col5, col6 = st.columns(2)
+
+    cost_by_channel = (
+        filtered.groupby(["채널", "배송비_분류"], dropna=False)
+        .size()
+        .reset_index(name="건수")
+    )
+    with col5:
+        st.subheader("채널별 비용 구조")
+        if not cost_by_channel.empty:
+            fig = px.bar(cost_by_channel, x="채널", y="건수", color="배송비_분류", barmode="stack")
+            fig.update_layout(xaxis_title="채널", yaxis_title="건수")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("표시할 데이터가 없습니다.")
+
+    free_return_trend = (
+        filtered[filtered["배송비_분류"] == "첫구매 무료반품"]
+        .groupby("연월", dropna=False)
+        .size()
+        .reset_index(name="건수")
+        .sort_values("연월")
+    )
+    with col6:
+        st.subheader("첫구매 무료반품 증가 추이")
+        if not free_return_trend.empty:
+            fig = px.line(free_return_trend, x="연월", y="건수", markers=True)
+            fig.update_layout(xaxis_title="연월", yaxis_title="건수")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("표시할 데이터가 없습니다.")
+
     st.subheader("요약 테이블")
     summary_table = (
         filtered.pivot_table(
@@ -278,3 +366,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+'''
+path = Path('/mnt/data/app_exchange_return_dashboard_fixed.py')
+path.write_text(code, encoding='utf-8')
+print(f"saved: {path}")
