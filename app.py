@@ -1,6 +1,4 @@
-from pathlib import Path
-
-code = r'''import re
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -366,7 +364,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-'''
-path = Path('/mnt/data/app_exchange_return_dashboard_fixed.py')
-path.write_text(code, encoding='utf-8')
-print(f"saved: {path}")
